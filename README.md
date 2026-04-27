@@ -31,3 +31,12 @@ Full setup instructions coming at project completion.
   for call-format artifacts ("question/questions" in Negative;
   "whatever/whereas/notwithstanding/beneficial/ratable" in Litigious).
   Weak_Modal category dropped due to >90% overlap with Uncertainty.
+
+- `data/processed/labels.csv` — Day 2 Block 3 outcome labels.
+  273 rows × 9 columns (3 IDs + 3 excess returns + 3 binary labels).
+  Excess return = stock return - SPY return over 1, 3, 5 trading days.
+  Binary labels = median split per window (y=1 if excess return below median).
+
+- `data/processed/dataset.csv` — Day 2 Block 4 modeling dataset.
+  273 rows × 27 columns. features.csv joined with labels.csv on
+  (ticker, quarter, date_parsed). This is Day 3's input.

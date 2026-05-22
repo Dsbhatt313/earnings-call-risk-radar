@@ -71,3 +71,129 @@ A 3-stage modeling pipeline trained one classifier per prediction horizon (1-day
 - ✅ **A rigorous demonstration of an ML methodology.** Time-based splits, fair cross-validation comparison, multi-method feature interpretability (coefficients + gain importance + SHAP).
 - ✅ **A real (if weak) signal.** AUC modestly above random on out-of-sample test.
 - ❌ **Not a deployable trading signal.** AUC 0.52–0.54 is insufficient for capital allocation. Reported as scientific finding, not investment recommendation.
+
+# Day 4 — FinBERT Sentiment Features
+
+## What I built today
+
+Extracted contextual sentiment features from 273 earnings call transcripts using FinBERT (a finance-tuned BERT model) and merged them with the existing lexicon-based feature set from Days 2-3.
+
+## Output
+
+`data/processed/dataset_v2.csv` — **273 rows × 52 columns**
+
+Feature groups:
+
+| Group | Columns | Source |
+|---|---|---|
+| Identifiers | 4 | ticker, quarter, date_parsed, date_raw |
+| Raw lexicon features | 9 | Day 2-3 (word counts, readability, finance dictionaries) |
+| Z-scored lexicon (per-ticker) | 9 | Day 2-3 |
+| Raw FinBERT features | 12 | **Day 4** — pos/neu/neg scores per section |
+| Z-scored FinBERT (per-ticker) | 12 | **Day 4** |
+| Returns / labels | 6 | excess_return_1d/3d/5d, y_1d/3d/5d |
+| Misc | 1 | call_seconds |
+
+## Pipeline
+
+```
+raw transcript (~9,591 words)
+        │
+        ▼
+split_transcript()  ──►  {prepared_remarks, qa, format}
+        │                       │
+        │                       └── format ∈ {standard, interview, qa_missing}
+        ▼
+chunk_text()  ──►  list of ~300-word chunks (sentence-aware)
+        │
+        ▼
+FinBERT pipeline  ──►  {positive, neutral, negative} per chunk
+        │
+        ▼
+aggregate()  ──►  6 features per section (12 total)
+        │
+        ▼
+per-ticker z-score  ──►  12 additional z-scored features
+        │
+        ▼
+merge with lexicon dataset  ──►  dataset_v2.csv
+```
+
+## Key decisions
+
+| Decision | Why |
+|---|---|
+| **FinBERT (ProsusAI)** over general BERT, VADER, GPT-2 | Only model that is (a) finance-trained, (b) ready-to-use without fine-tuning, (c) outputs the 3 scores we need, (d) free + local |
+| **PyTorch** over TensorFlow / JAX | What FinBERT ships in. Path of least resistance. |
+| **Section-aware splitting** (prep vs Q&A) over naive chunking | Prep tone is scripted; Q&A is unscripted and more revealing. Finance research supports treating them separately. |
+| **Sentence-grouped chunking** (300/380 words) over fixed-size or single-sentence | Sentences stay whole; chunk count manageable (~7k); FinBERT sees coherent input |
+| **truncation=True, max_length=512** | Safety net for the 3.5% of chunks that exceed 512 tokens (mostly finance-jargon-heavy Q&A) |
+| **Per-ticker z-score on FinBERT outputs** | Reproduces Day 3's winning move. Absolute neg_share is 0 for most calls; z-score reveals per-company anomalies. |
+| **Tag NFLX + late TSLA as `format='interview'`** instead of forcing the split or dropping them | Honest representation. NaN propagates to FinBERT features. XGBoost handles NaN natively. |
+
+## Format breakdown of 273 transcripts
+
+| Format | Count | Treatment |
+|---|---|---|
+| standard | 251 | Both prep and qa sections scored |
+| interview | 21 | NFLX + late TSLA. Single block scored as qa. Prep features = NaN. |
+| qa_missing | 1 | PYPL 2019-Q4. Transcription artifact. qa features = NaN. |
+
+## FinBERT vs lexicon analysis
+
+Correlation `negative_count_zscore` ↔ `qa_neg_mean_zscore` = **0.35**. Sweet spot — complementary signals.
+
+| Source | What it catches | Example |
+|---|---|---|
+| Lexicon | Lexical negativity (explicit "loss/writedown/impairment") | XOM 2020-Q4 ($20B loss, factual tone) |
+| FinBERT | Tonal negativity (hedging, evasive language) | SNAP 2022-Q2 ("navigating dynamics," no scary words, stock dropped 39%) |
+
+Both feature sets kept for Day 5 modeling.
+
+## Validation — FinBERT correctly flags known bad quarters
+
+Top per-ticker outliers (z-score on `qa_neg_share`):
+
+| Ticker | Quarter | Z-score | Real event |
+|---|---|---|---|
+| AAPL | 2020-Q2 | 2.22 | COVID — guidance withdrawn |
+| AMZN | 2022-Q3 | 2.35 | AWS slowdown, weak Q4 guide |
+| GOOGL | 2022-Q4 | 2.85 | Revenue miss, Bard demo failed |
+| NVDA | 2023-Q2 | 2.15 | Gaming weakness (pre-AI boom) |
+| PYPL | 2022-Q3 | 1.69 | Engagement decline |
+
+## Files in this commit
+
+```
+notebooks/04_finbert.ipynb       ← all Day 4 work
+data/processed/dataset_v2.csv    ← final output (52 columns)
+data/processed/finbert_scores.csv ← intermediate (29 columns)
+requirements.txt                  ← pinned dependencies
+```
+
+## Runtime cost
+
+- Setup + diagnostic: ~15 min
+- Section-splitter dev (5 iterations): ~90 min
+- Chunking strategy + validation: ~30 min
+- FinBERT scoring (273 calls × ~13 chunks × ~0.5s on CPU): **61.8 min**
+- Z-score + comparison + save: ~30 min
+- **Total: ~4 hours**
+
+## Tech stack added
+
+- `transformers==5.9.0` — Hugging Face model loader
+- `torch==2.12.0` — PyTorch backend
+- `nltk` — sentence tokenizer (`punkt_tab`)
+- Model: `ProsusAI/finbert` (440 MB, cached locally)
+
+## What's next (Day 5)
+
+Train XGBoost on `dataset_v2.csv` to predict `y_3d` and `y_5d`. Compare three configurations:
+1. Lexicon-only baseline (reproduce Day 3)
+2. FinBERT-only
+3. Combined
+
+Test-set AUC is the ground truth. SHAP for feature importance.
+
+Day 3 baselines to beat: `y_3d` AUC = 0.525, `y_5d` AUC = 0.538.

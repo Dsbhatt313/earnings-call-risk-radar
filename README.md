@@ -197,3 +197,54 @@ Train XGBoost on `dataset_v2.csv` to predict `y_3d` and `y_5d`. Compare three co
 Test-set AUC is the ground truth. SHAP for feature importance.
 
 Day 3 baselines to beat: `y_3d` AUC = 0.525, `y_5d` AUC = 0.538.
+
+Day 5 — Combined Model (Lexicon + FinBERT)
+Status: Complete. Two shipping models, two real improvements over Day 3, eight findings.
+What this day did
+Trained models that combine Day 3's hand-crafted lexicon features with Day 4's FinBERT contextual sentiment features. Tested whether adding FinBERT improves out-of-sample prediction of forward excess returns over Day 3's lexicon-only baseline.
+Results
+WindowDay 3 (lexicon only)Day 5 (lexicon + FinBERT)Improvementy_3d0.525 (LR v2, 3 features)0.550 (XGBoost, 17 features)+0.025y_5d0.538 (XGBoost tuned)0.566 (LR L2, 17 features)+0.028
+Both shipping models were pre-committed by CV-validation AUC before evaluating on the test set. Models locked in, test touched once, results reported as-is.
+For the full findings (including the eight specific patterns we identified) see day5_findings.md.
+Files this day produced
+Trained models (models/)
+FileWhat it isSizemodel_y3d_xgb_day5.joblibXGBoost classifier for 3-day window92 KBmodel_y5d_lr_day5.joblibLogistic regression pipeline (scaler + LR) for 5-day window2.5 KBfeature_cols_day5.joblibList of 17 feature names used by both models0.4 KB
+Data (data/processed/)
+FileWhat it isdataset_v2.csvDay 4 output — lexicon + FinBERT features merged. Input to Day 5 modeling. (273 × 52)day5_results_summary.csvTest AUCs, CV val AUCs, model choices, comparison to Day 3
+Notebook (notebooks/)
+FileWhat it is05_modeling_v2.ipynbBlock-by-block Day 5 modeling work — reproduction of Day 3, FinBERT-augmented tuning, SHAP analysis, test evaluation
+How to reproduce Day 5
+pythonimport joblib
+import pandas as pd
+from pathlib import Path
+
+REPO_ROOT = Path.cwd()
+dataset = pd.read_csv(REPO_ROOT / "data" / "processed" / "dataset_v2.csv", parse_dates=["date_parsed"])
+
+# Same time-based split as Day 3
+TRAIN_END = pd.Timestamp("2022-08-01")
+VAL_END = pd.Timestamp("2022-10-01")
+test_df = dataset[dataset["date_parsed"] >= VAL_END].copy()
+
+# Load shipping models
+features = joblib.load(REPO_ROOT / "models" / "feature_cols_day5.joblib")
+model_y3d = joblib.load(REPO_ROOT / "models" / "model_y3d_xgb_day5.joblib")
+model_y5d = joblib.load(REPO_ROOT / "models" / "model_y5d_lr_day5.joblib")
+
+# Predict
+X_test = test_df[features]
+pred_y3d = model_y3d.predict_proba(X_test)[:, 1]   # XGBoost, handles any NaN natively
+# For LR (y_5d), drop rows with NaN in FinBERT features
+clean_mask = X_test.isna().any(axis=1) == False
+pred_y5d = model_y5d.predict_proba(X_test[clean_mask])[:, 1]
+What Day 5 did NOT do (scope honesty)
+
+Did not test on data outside the 273-call, 30-ticker corpus
+Did not validate that findings generalize beyond Q2 2019 – Q1 2023
+Did not retrain on test data, did not retune after seeing test
+Did not claim statistical significance — test n=44 is too small for that
+Did not implement the router ensemble (deferred to post-project ideas)
+
+Headline takeaway
+Combining FinBERT contextual sentiment with hand-crafted lexicon features produced modest, consistent improvements over Day 3's lexicon-only baseline on a held-out test set. Two different model types (XGBoost for 3-day window, LR for 5-day window) both gained similar amounts — strongest single piece of evidence that FinBERT is doing real work, not contributing noise.
+The findings document explains which feature-level patterns survived replication across four independent model setups and which are weaker.

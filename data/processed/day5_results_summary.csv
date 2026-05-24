@@ -1,0 +1,5 @@
+window,day,model,features,n_features,cv_val_auc,holdout_val_auc,test_auc,test_n,day3_test_auc,delta_vs_day3
+y_1d,Day 5,"(skipped — Day 3 proved regime-dominated, test AUC 0.375)",N/A,0,,,,,0.375,
+y_3d,Day 5,XGBoost (tuned),lexicon-z (9) + FinBERT-z (8),17,0.5961,0.7,0.55,44.0,0.525,0.025
+y_5d,Day 5,"Logistic Regression (L2, C=0.05)",lexicon-z (9) + FinBERT-z (8),17,0.5777,0.5,0.5657,40.0,0.538,0.0277
+y_3d (clean test footnote),Day 5,XGBoost on 40-row test (interview-format excluded),lexicon-z (9) + FinBERT-z (8),17,,,0.5865,40.0,0.525,0.0615

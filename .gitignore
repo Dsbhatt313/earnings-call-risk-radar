@@ -4,6 +4,7 @@ __pycache__/
 .ipynb_checkpoints/
 .env
 data/raw/
-data/processed/
+data/processed/transcripts.csv
+data/processed/transcripts_v2.csv
 *.DS_Store
 .vscode/

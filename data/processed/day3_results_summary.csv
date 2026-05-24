@@ -1,0 +1,4 @@
+Window,Model,Hyperparams,CV val AUC,Holdout val AUC,TEST AUC,Generalized
+y_1d,LR v1 (tuned),"C=10, L1, balanced",0.583,0.643,0.375,No
+y_3d,LR v2 (heavy reg),"C=0.1, L1 (3 features)",0.542,0.6,0.525,Yes (weakly)
+y_5d,XGBoost (tuned),"n_est=100, depth=3, lr=0.05",0.547,0.393,0.538,Yes (weakly)

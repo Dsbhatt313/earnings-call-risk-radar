@@ -6,5 +6,8 @@ __pycache__/
 data/raw/
 data/processed/transcripts.csv
 data/processed/transcripts_v2.csv
+data/processed/chunks_day6.csv
+data/processed/embeddings_day6.npy
 *.DS_Store
 .vscode/
+chroma_db/

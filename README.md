@@ -198,7 +198,8 @@ Test-set AUC is the ground truth. SHAP for feature importance.
 
 Day 3 baselines to beat: `y_3d` AUC = 0.525, `y_5d` AUC = 0.538.
 
-Day 5 — Combined Model (Lexicon + FinBERT)
+# Day 5 — Combined Model (Lexicon + FinBERT)
+
 Status: Complete. Two shipping models, two real improvements over Day 3, eight findings.
 What this day did
 Trained models that combine Day 3's hand-crafted lexicon features with Day 4's FinBERT contextual sentiment features. Tested whether adding FinBERT improves out-of-sample prediction of forward excess returns over Day 3's lexicon-only baseline.
@@ -248,3 +249,425 @@ Did not implement the router ensemble (deferred to post-project ideas)
 Headline takeaway
 Combining FinBERT contextual sentiment with hand-crafted lexicon features produced modest, consistent improvements over Day 3's lexicon-only baseline on a held-out test set. Two different model types (XGBoost for 3-day window, LR for 5-day window) both gained similar amounts — strongest single piece of evidence that FinBERT is doing real work, not contributing noise.
 The findings document explains which feature-level patterns survived replication across four independent model setups and which are weaker.
+
+# Day 6 — RAG Pipeline Foundation
+
+> Built the retrieval half of the Earnings Call Risk Radar. By end of Day 6, the project can take a natural-language query, find the most semantically relevant transcript chunks across 273 earnings calls, and return them with metadata. Day 7 will add Gemini for grounded answer generation.
+
+---
+
+## What ships at end of Day 6
+
+Four production Python modules + a persistent ChromaDB index holding **13,518 chunks** from **273 transcripts**, queryable in **~100ms per query** after a one-time model load.
+
+```
+Query → Arctic embedding (with query prefix) → ChromaDB cosine search → top-K chunks with similarity scores
+```
+
+---
+
+## Architecture
+
+```
+┌──────────────────────────┐
+│ transcripts_v2.csv       │   273 transcripts × 7 columns
+│ (273 calls, raw text)    │   from Day 1-2
+└────────┬─────────────────┘
+         │
+         ▼
+┌──────────────────────────┐
+│ src/rag/chunker.py       │   Sentence-aware chunking
+│                          │   - spaCy splitting
+│                          │   - Arctic tokenizer budget
+│                          │   - 300 target / 50 overlap / 400 ceiling
+│                          │   - Three-way section labels
+└────────┬─────────────────┘
+         │  scripts/run_chunker.py
+         ▼
+┌──────────────────────────┐
+│ chunks_day6.csv          │   13,518 chunks × 11 metadata columns
+└────────┬─────────────────┘
+         │
+         ▼
+┌──────────────────────────┐
+│ src/rag/embedder.py      │   Arctic-l-v2.0 embedding
+│                          │   - 1024-dim, L2-normalized
+│                          │   - Batched (32 at a time)
+└────────┬─────────────────┘
+         │  scripts/run_embedder.py
+         ▼
+┌──────────────────────────┐
+│ embeddings_day6.npy      │   (13518, 1024) float32, 53 MB
+└────────┬─────────────────┘
+         │
+         ▼
+┌──────────────────────────┐
+│ src/rag/vector_store.py  │   ChromaDB loader
+│                          │   - Persistent HNSW index
+│                          │   - Cosine similarity
+│                          │   - 6-field metadata schema
+└────────┬─────────────────┘
+         │  scripts/run_chroma_loader.py
+         ▼
+┌──────────────────────────┐
+│ chroma_db/               │   Persistent ChromaDB instance
+│ collection:              │   13,518 chunks queryable
+│ risk_radar_chunks        │
+└────────┬─────────────────┘
+         │
+         ▼
+┌──────────────────────────┐
+│ src/rag/retriever.py     │   Query interface
+│                          │   - lru_cache model loading
+│                          │   - Query prefix injection
+│                          │   - Top-K with metadata filters
+│                          │   - Similarity scoring
+└──────────────────────────┘
+         │
+         ▼
+   Results: list[dict]
+   each: {chunk_id, text, metadata, similarity, distance}
+```
+
+---
+
+## Tech stack
+
+| Layer | Choice | Why |
+|---|---|---|
+| Vector DB | ChromaDB 1.5.9 (local persistent) | Our 13.5K vectors are tiny relative to ChromaDB's capability; local = no quotas, no internet dependency |
+| Embedding model | Snowflake/snowflake-arctic-embed-l-v2.0 (1024-dim) | MTEB ~65 (top tier), trained with hard-negative mining, file size 1.1 GB (smaller than bge-large) |
+| Sentence splitter | spaCy `en_core_web_sm` | Correctly handles "Apple Inc." and "$89.5 billion" where regex fails |
+| LLM (Day 7) | Gemini API (free tier) | Generous free tier; no credit card; brand-agnostic for the recruiter narrative |
+
+---
+
+## Chunking strategy
+
+Sentence-aware with overlap, respecting Arctic's tokenizer budget:
+
+- **Target chunk size:** 300 tokens (~225 words, ~10-15 sentences)
+- **Overlap:** 50 tokens (last 1-2 sentences of chunk N become first sentences of chunk N+1)
+- **Hard ceiling:** 400 tokens (leaves 112-token headroom under Arctic's 512-token limit)
+- **Sentence boundaries:** spaCy detects them; chunks always end on complete sentences
+
+### Section model
+
+Three-way `section` label (originally binary in the plan):
+
+| Section | What it is | Calls | Chunks |
+|---|---|---|---|
+| `prep` | Prepared remarks before Q&A | 259 | 5,174 |
+| `qa` | Analyst Q&A after prepared remarks | 258 | 7,728 |
+| `interview` | NFLX-style moderated interview (no prep/qa split) | 14 | 616 |
+
+The `interview` label was added during Day 6 after discovering that 14 Netflix calls use a moderated interview format with no traditional prepared-remarks-then-Q&A structure.
+
+### Marker variants
+
+The Q&A section is marked by two variants in the source data:
+- `"Questions and Answers:"` — 55 calls
+- `"Questions & Answers:"` — 204 calls
+
+The chunker matches both.
+
+---
+
+## Output schema (`chunks_day6.csv`)
+
+| Column | Type | Example | Notes |
+|---|---|---|---|
+| `chunk_id` | str | `AAPL_2019-Q3_prep_000` | unique, format `{ticker}_{quarter}_{section}_{idx:03d}` |
+| `ticker` | str | `AAPL` | |
+| `quarter` | str | `2019-Q3` | |
+| `call_date` | str (date) | `2019-07-30` | |
+| `section` | str | `prep` / `qa` / `interview` | three-way |
+| `chunk_index` | int | `3` | per-section ordering |
+| `sentence_start_idx` | int | `47` | first sentence in chunk (within section's sentence list) |
+| `sentence_end_idx` | int | `62` | last sentence (inclusive) |
+| `n_tokens` | int | `298` | Arctic tokenizer count |
+| `n_chars` | int | `1247` | character count |
+| `text` | str | (chunk text) | the chunk |
+
+---
+
+## How to reproduce
+
+### 1. Install dependencies
+
+```bash
+pip install chromadb sentence-transformers spacy
+python -m spacy download en_core_web_sm
+```
+
+### 2. Run the chunker
+
+```bash
+python scripts/run_chunker.py
+```
+
+Reads `data/processed/transcripts_v2.csv`, writes `data/processed/chunks_day6.csv`.
+Expected runtime: ~3-7 minutes (CPU bound by Arctic tokenizer calls).
+
+### 3. Embed chunks
+
+```bash
+python scripts/run_embedder.py
+```
+
+Reads `chunks_day6.csv`, writes `embeddings_day6.npy`.
+Expected runtime: **highly hardware-dependent**.
+- GPU: ~5 minutes
+- Modern CPU with AVX: ~30 minutes
+- Older CPU: 2-4 hours (observed: 3h 26m on the development laptop)
+
+### 4. Load into ChromaDB
+
+```bash
+python scripts/run_chroma_loader.py
+```
+
+Reads chunks + embeddings, writes to `chroma_db/`.
+Expected runtime: ~30 seconds.
+
+### 5. Query the index
+
+```python
+from src.rag.retriever import retrieve
+
+results = retrieve("supply chain disruption and production delays", k=5)
+for r in results:
+    print(f"sim={r['similarity']:.4f}  {r['chunk_id']}")
+    print(f"  text: {r['text'][:200]}...")
+```
+
+Or run the demo script:
+
+```bash
+python scripts/demo_retrieval.py
+```
+
+---
+
+## Usage examples
+
+### Basic retrieval
+
+```python
+from src.rag.retriever import retrieve
+
+# Top-5 chunks across all 273 calls
+results = retrieve("revenue growth in emerging markets", k=5)
+```
+
+### Filter by ticker
+
+```python
+results = retrieve(
+    "iPhone revenue performance",
+    k=5,
+    filter={"ticker": "AAPL"}
+)
+```
+
+### Filter by ticker AND quarter
+
+```python
+results = retrieve(
+    "iPhone revenue performance",
+    k=5,
+    filter={"$and": [{"ticker": "AAPL"}, {"quarter": "2019-Q3"}]}
+)
+```
+
+### Filter by section (multiple values)
+
+```python
+# Q&A or interview content only
+results = retrieve(
+    "CEO outlook on growth",
+    k=5,
+    filter={"section": {"$in": ["qa", "interview"]}}
+)
+```
+
+### Result structure
+
+Each result is a dict:
+
+```python
+{
+    "chunk_id": "AAPL_2019-Q3_prep_002",
+    "text": "For iPhone, we generated $26 billion in revenue. While this is down 12%...",
+    "metadata": {
+        "ticker": "AAPL",
+        "quarter": "2019-Q3",
+        "call_date": "2019-07-30",
+        "section": "prep",
+        "chunk_index": 2,
+        "n_tokens": 302
+    },
+    "similarity": 0.68,    # cosine similarity, 0..1 (higher = more similar)
+    "distance": 0.32       # ChromaDB's raw distance (1 - similarity)
+}
+```
+
+---
+
+## Verification
+
+Three test scripts ship with Day 6 to verify the pipeline:
+
+### `tests/test_arctic_embed.py`
+
+Sanity-tests the Arctic embedding model: dimension is 1024, similar sentences get high similarity, dissimilar sentences get low similarity, query prefix mechanism works.
+
+```bash
+python tests/test_arctic_embed.py
+```
+
+### `tests/test_chunker_sample.py`
+
+Six assertions on a 3-transcript sample:
+1. No empty chunks
+2. Token budget respected (no chunk > 400 tokens except force-saved oversized sentences)
+3. Median chunk size in [200, 400]
+4. All chunk_ids unique
+5. Section values clean
+6. Overlap mechanism works (no gaps between consecutive chunks)
+
+```bash
+python tests/test_chunker_sample.py
+```
+
+### `scripts/verify_edge_cases.py`
+
+Verifies known limitations don't break retrieval in practice:
+- NFLX interview-format calls surface correctly in unfiltered queries
+- `section=interview` filter returns only interview content
+- PYPL 2019-Q4 (with mislabeled section) is still retrievable
+
+```bash
+python scripts/verify_edge_cases.py
+```
+
+---
+
+## Demo retrieval results
+
+From `scripts/demo_retrieval.py`:
+
+### Demo 1: Unfiltered "supply chain disruption and production delays"
+
+```
+[1] sim=0.5737  COST_2022-Q1_prep_013
+    text: But overall, the factors pressuring supply chains, and inflation include
+          port delays container challenges, COVID disruptions, shortages...
+
+[2] sim=0.5388  COST_2021-Q3_prep_012
+    text: ...turnaround of a container hitting the U.S., delivering its contents,
+          and being back at the U.S. port to head back overseas...
+
+[3] sim=0.5183  AAPL_2023-Q1_qa_000
+    text: David Vogt -- UBS -- Analyst Thanks, guys, for taking my question. So Tim,
+          and maybe this is for Luca as well. You talked about t...
+```
+
+Cross-company semantic retrieval works without any explicit ticker filter.
+
+### Demo 3: "iPhone revenue performance compared to last year" filtered to AAPL 2019-Q3
+
+```
+[1] sim=0.6800  AAPL_2019-Q3_prep_002
+    text: That's equivalent to about $1.5 billion of revenue. Importantly, in
+          constant currency, our revenue grew in all five of our geographic
+          segments. For iPhone, we generated $26 billion in revenue. While this
+          is down 12% from...
+```
+
+Top-1 result is the exact paragraph that answers the question.
+
+---
+
+## Known limitations
+
+### 1. PYPL 2019-Q4 has malformed source
+
+The `"Questions and Answers:"` marker in the source file appears 111 chars from the END of the transcript instead of before the Q&A content. The parser interprets all content before the marker as `prep`.
+
+**Net effect:** PYPL 2019-Q4 has 0 qa chunks; its Q&A content is mislabeled as `prep`.
+
+**Mitigation:** content is still retrievable via unfiltered queries (top result for "Venmo growth" query is `PYPL_2019-Q4_prep_023` at similarity 0.6863). Only section-filtered queries on this call are affected.
+
+**Why not fixed:** adding a heuristic to detect "marker too close to end" could mis-fire on calls with legitimately short Q&A. Cost of fix exceeds benefit on 1 row out of 273 (0.37%).
+
+### 2. Boilerplate chunks share high similarity
+
+Opening operator text ("Good day and welcome to...") and forward-looking-statements disclaimers are nearly identical across all 273 calls. Their embeddings cluster together.
+
+**Practical impact:** very generic queries may surface these as filler. Specific queries (which are the normal use case) do not. Worth measuring on Day 8 eval.
+
+### 3. Cosmetic double-period artifact
+
+Where `[Operator Instructions]` was stripped between two sentences, the chunk text may contain `..` (two periods). Arctic's tokenizer and spaCy both handle this fine; no retrieval impact. Purely visual.
+
+### 4. `CLOSING_MARKERS` includes ticker-specific text
+
+The constant includes `"More AAPL analysis"` to strip Motley Fool's footer. Other tickers (`"More NFLX analysis"`, `"More MSFT analysis"`) won't be stripped, leaving a few words of footer text at the end of non-AAPL calls' last chunks. Minor pollution.
+
+---
+
+## File inventory (Day 6 additions)
+
+### Source modules (4)
+
+- `src/__init__.py` — package marker
+- `src/rag/__init__.py` — package marker
+- `src/rag/chunker.py` — sentence-aware chunker with overlap
+- `src/rag/embedder.py` — Arctic embedding pipeline
+- `src/rag/vector_store.py` — ChromaDB loader + accessor
+- `src/rag/retriever.py` — query interface
+
+### Scripts (9)
+
+- `scripts/__init__.py` — package marker
+- `scripts/run_chunker.py` — chunk all 273 transcripts
+- `scripts/run_embedder.py` — embed all 13,518 chunks
+- `scripts/run_chroma_loader.py` — load into persistent ChromaDB
+- `scripts/demo_retrieval.py` — 4 demo retrieval queries
+- `scripts/verify_edge_cases.py` — NFLX + PYPL spot-checks
+- `scripts/diagnose_qa_marker.py` — diagnostic for Q&A marker variants
+- `scripts/diagnose_pypl_2019q4.py` — diagnostic for PYPL malformed marker
+- `scripts/sanity_check_embeddings.py` — within-vs-between similarity check
+
+### Tests (3)
+
+- `tests/__init__.py` — package marker
+- `tests/test_arctic_embed.py` — Block 2 model sanity test
+- `tests/test_chunker_sample.py` — Block 3c chunker sample test
+
+### Data artifacts (gitignored, regeneratable)
+
+- `data/processed/chunks_day6.csv` — 13,518 rows
+- `data/processed/embeddings_day6.npy` — (13518, 1024) float32
+- `chroma_db/` — persistent ChromaDB instance
+
+---
+
+## What's next: Day 7
+
+The retrieval system is in place. Day 7 builds the generation half:
+
+- Install `google-generativeai` package
+- Design the prompt template (citation format, grounding discipline)
+- Build `src/rag/generator.py` — `generate_answer(query, k=5, filter=None)`
+- Hallucination guardrails: detect when answer cites facts not in chunks
+- Integration with Day 5 risk score: "this call was scored 0.78 risky — here's why"
+
+---
+
+## Acknowledgments
+
+Built as part of the Earnings Call Risk Radar 10-day project. Day 6 is the foundation; Days 7-10 build on top.
+
+Tools: ChromaDB, sentence-transformers, spaCy, Hugging Face Hub, Snowflake AI (Arctic embed), Google AI (Gemini).

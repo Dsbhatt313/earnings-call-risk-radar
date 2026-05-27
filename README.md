@@ -671,3 +671,206 @@ The retrieval system is in place. Day 7 builds the generation half:
 Built as part of the Earnings Call Risk Radar 10-day project. Day 6 is the foundation; Days 7-10 build on top.
 
 Tools: ChromaDB, sentence-transformers, spaCy, Hugging Face Hub, Snowflake AI (Arctic embed), Google AI (Gemini).
+
+# Day 7 — RAG Generation Pipeline with Risk Model Integration
+
+Stage 3 of the Earnings Call Risk Radar: turn retrieved transcript chunks into grounded, cited answers, then connect the answer pipeline to Day 5's risk classifier so the system explains its own predictions with direct evidence from the call.
+
+---
+
+## What Day 7 ships
+
+1. **`src/rag/gemini_client.py`** — `lru_cache`-singleton wrapper around the Gemini v2 SDK (`google-genai==2.6.0`). Loads `GEMINI_API_KEY` from `.env`, builds one `genai.Client` per process, fails loudly with specific exceptions if config is missing.
+
+2. **`src/rag/generator.py`** — the core RAG module. Public function `generate_answer(query, k=5, filter=None, thinking=False)` does the full flow: retrieve → adaptive top-K filter → prompt build → Gemini call (with retry-on-503) → footnote citation parse → lexical faithfulness check → structured return.
+
+3. **`src/rag/risk_explainer.py`** — the integration. Public function `explain_risk(ticker, quarter)` loads both Day 5 shipping models, extracts per-instance feature contributions (SHAP for XGBoost, exact coefficient math for LR), builds an adaptive RAG question from content-classified features, and returns scores + explanation (focused on this call + unfiltered "elsewhere" lookup).
+
+4. **`scripts/demo_generation.py`** — 5-query demo (4 on-topic + 1 deliberately off-topic). Reuses Day 6's `demo_retrieval.py` queries for side-by-side comparison.
+
+5. **`scripts/demo_risk_explainer.py`** — 3-case integration demo (AAPL standard, BYND high-risk era, NFLX interview-format edge case).
+
+6. **`scripts/test_gemini_connection.py`** — diagnostic for Gemini connectivity.
+
+7. **`tests/test_citation_parser.py`** — 7 sanity cases for the citation parser (clean, undefined footnote, orphan source, hallucinated chunk_id, duplicate definition, multi-citation, triple multi-citation).
+
+---
+
+## Design decisions (locked Day 7)
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Gemini SDK | `google-genai` v2 (not legacy `google-generativeai`) | Old SDK deprecated by Google May 2026 |
+| Prompt approach | Zero-shot | Modern instruction-following; few-shot deferred to evaluation-driven improvement |
+| Abstention behavior | Soft refuse + partial answer + provenance tags (`[Inferred]`, `[Not in chunks]`) | Useful UX + hallucination visibility |
+| Citation format | Footnote `[1] [2]` + mandatory Sources section | Readable + Streamlit-friendly + chunk_id visible at a glance |
+| Citation validation | Post-hoc regex parser, 4 checks, non-crashing warnings | Surfaces model failure modes without breaking the pipeline |
+| Low-similarity handling | Adaptive top-K (threshold=0.45, min=2 chunks, max=5 chunks) | Saves API cost on doomed queries; clean abstention path |
+| Faithfulness check | Lexical overlap, threshold 0.30 | Cheap tripwire for Day 7; LLM-as-judge promoted to Day 8 eval |
+| Gemini thinking tokens | OFF by default, exposed as `thinking` parameter | Day 9 Streamlit will toggle this in the UI |
+| Temperature | 0.0 | Deterministic, grounded |
+| Retry on 503 | 4 attempts with 2s/5s/10s backoff | Graceful failure, demo continues even during Gemini capacity dips |
+| Day 5 models used | Both (y_3d XGBoost + y_5d LR) | Recruiter sees model-selection sophistication; Day 9 UI toggles horizon |
+| Feature → question mapping | Content features only (10 of 17 features) | Meta-linguistic features (sentence length, readability) can't ground content queries |
+| RAG filter strategy | Focused (this call) + Elsewhere (unfiltered, cross-call) | Direct evidence + comparable patterns elsewhere |
+
+---
+
+## Quickstart
+
+### Prerequisites
+- Day 6 complete: ChromaDB populated, Arctic embeddings in place
+- Day 5 models on disk under `models/`
+- `.env` file at project root containing `GEMINI_API_KEY=<your_key>`
+
+### Verify Gemini connectivity
+```powershell
+python scripts/test_gemini_connection.py
+```
+Expected: a 5-word reply, latency ~1-3s, PASS at the end.
+
+### Run RAG demo
+```powershell
+python scripts/demo_generation.py
+```
+Expected: 4 on-topic answers with citations and faithfulness scores; Demo 5 (sourdough query) abstains cleanly.
+
+### Run risk-explanation demo
+```powershell
+python scripts/demo_risk_explainer.py
+```
+Expected: AAPL and BYND produce both focused + elsewhere RAG explanations; NFLX shows graceful interview-format handling (y_5d LR skips, y_3d XGBoost proceeds, focused RAG abstains).
+
+### Programmatic use
+```python
+from src.rag.generator import generate_answer
+from src.rag.risk_explainer import explain_risk
+
+# Pure RAG (any question)
+result = generate_answer(
+    "What did Apple say about supply chain?",
+    k=5,
+    filter={"ticker": "AAPL"},
+)
+print(result["answer"])
+print(result["faithfulness"]["mean_overlap"])
+
+# Risk explanation for a (ticker, quarter) pair
+risk = explain_risk("BYND", "2021-Q3")
+print(risk["scores"]["y_3d"]["risk_score"])
+print(risk["question"])
+print(risk["explanation_focused"]["answer"])
+```
+
+---
+
+## Quality verification — three independent guardrails
+
+Day 7 stacks three layers of verification on every answer:
+
+1. **Adaptive top-K threshold** — chunks below similarity 0.45 are dropped. If fewer than 2 chunks qualify, the system abstains without calling Gemini. Demo 5 (off-topic sourdough query on earnings-call corpus) triggered this cleanly with similarities 0.16-0.18.
+
+2. **Citation health parser** — validates citation structure: every `[N]` reference is defined in the Sources section, every defined source is referenced in the body, every cited chunk_id was actually in the retrieved set (catches hallucinated chunk_ids), no duplicate definitions. Issues are returned as warnings on the result dict — they never crash the pipeline.
+
+3. **Lexical faithfulness check** — for each cited claim, computes `|claim_tokens ∩ chunk_tokens| / |claim_tokens|`. Claims below 0.30 overlap are flagged. Provenance-tagged claims (`[Inferred]`, `[Not in chunks]`) are correctly skipped. Multi-citations check against the union of cited chunks.
+
+Across the 4 answered demos in `demo_generation.py`, all three guardrails returned VALID. Across the 3 cases in `demo_risk_explainer.py`, 5 of 6 RAG calls answered with VALID citation health.
+
+---
+
+## Sample output — the headline result
+
+`explain_risk("BYND", "2021-Q3")` produced this focused RAG answer (excerpt, with citations preserved):
+
+> The company experienced "operational challenges of this environment" and "the events of the last year" [2]. There were "floods and this pandemic and the labor issues" which led to more cautious guidance for the fourth quarter [2]. ... Ethan Brown stated, "I feel enormously confident about where we're headed" [2]. ... The CFO mentioned "some things that were probably a little unusual in Q4," including trade discounts and an inventory write-off [4].
+>
+> Sources:
+> [1] BYND_2021-Q3_prep_001
+> [2] BYND_2021-Q3_qa_026
+> [3] BYND_2021-Q3_qa_033
+> [4] BYND_2021-Q3_qa_017
+> [5] BYND_2021-Q3_prep_000
+
+Faithfulness score: 0.744. Citation health: VALID.
+
+Day 5's XGBoost flagged BYND 2021-Q3 with a 0.573 risk score driven by elevated negativity in Q&A responses. Day 7 went to the actual transcript and surfaced the specific operational stresses (floods, pandemic, labor, inventory write-offs, Beyond 3.0 weakness) that the model was implicitly detecting through statistical language patterns. The connection between number and explanation is direct, cited, and verifiable.
+
+---
+
+## Known limitations
+
+### 1. Interview-format calls underperform end-to-end
+
+NFLX and TSLA calls use a conversational interview format rather than scripted prepared remarks + Q&A. Day 5 documented this as Finding #6 (XGBoost loses ~3.6 AUC points on these rows). Day 7 inherits the same weakness: the chunker produces conversational chunks that don't lexically match content-themed queries, and focused RAG abstains for NFLX 2022-Q4 in the demo.
+
+**Status:** Documented characteristic of the corpus + chunker, not a Day 7 bug. The system fails gracefully (abstention message, no hallucination). Day 8 will explore whether a lower retrieval threshold for filtered queries or interview-format-specific chunking would help.
+
+### 2. Safer-classified calls produce awkward "absence" questions
+
+When all top content-driver features point in the "safer" direction (low negativity, low uncertainty), the adaptive question becomes *"What did management discuss regarding absence of major concerns?"* — which a transcript-grounded RAG cannot answer because transcripts contain things that were said, not things that were absent.
+
+**Status:** Architectural finding from Block 6's second iteration. The system correctly abstains rather than fabricating. Day 8 / future improvements: detect "safer-only" driver patterns and switch to a positive-framing question (*"What positive developments and confident statements did management emphasize?"*).
+
+### 3. Lexical faithfulness has known paraphrase blindness
+
+If the chunk says *"iPhone revenue declined 12% year-over-year"* and the model writes *"iPhone sales fell twelve percent compared to 2018,"* lexical overlap is near zero — the meaning is supported but the words don't match. The Day 7 faithfulness check would flag this as unsupported.
+
+**Status:** Acknowledged tripwire-level check, not a measurement-grade metric. Day 8 promotes LLM-as-judge (using a different model — likely Claude API — to avoid the "marking your own homework" bias) for true faithfulness measurement.
+
+### 4. Similarity threshold (0.45) is a default, not a tuned value
+
+Block 4 confirmed 0.45 is functional on this corpus (on-topic chunks cluster 0.45-0.70, off-topic at 0.15-0.20, wide signal/noise gap). But "functional" is not "optimal." Borderline queries (similarities in 0.30-0.45 range) haven't been tested.
+
+**Status:** Defensible default. Day 8 will tune against hand-labeled queries with ground truth.
+
+### 5. New-transcript ingestion requires manual steps
+
+The Day 5 → Day 7 pipeline assumes the transcript is already in `data/processed/dataset_v2.csv` (Day 4 output) and its chunks are already in ChromaDB (Day 6 output). A genuinely new transcript would require: (a) running Day 4's chunker + FinBERT pipeline, (b) appending the row to `dataset_v2.csv`, (c) embedding new chunks into ChromaDB. None of these are wrapped into a single command yet.
+
+**Status:** Day 10 (deployment / Streamlit) will productize this as an upload-and-process flow. Until then, the pipeline assumes the data is pre-loaded.
+
+### 6. Gemini 2.5 "thinking" token cost on paid tier
+
+Day 7 demos run on the free tier where thinking tokens (~141 per call by default) are free. On paid tier, those tokens cost real money. Day 7 ships with thinking OFF by default specifically to keep paid-tier costs predictable. The `thinking` parameter exists for cases where the user explicitly wants the deeper reasoning (Day 9 Streamlit toggle).
+
+**Status:** Documented behavior, not a bug. Cost is ~$0.0003 per query on Flash with thinking off, doubling roughly with thinking on.
+
+---
+
+## File-by-file summary
+
+```
+src/rag/gemini_client.py     30 lines    Singleton genai.Client with .env loading
+src/rag/generator.py        400 lines    Full RAG pipeline (retrieve→prompt→generate→verify)
+src/rag/risk_explainer.py   350 lines    Day 5 → Day 7 integration with content-vs-meta classification
+scripts/demo_generation.py  170 lines    5-query end-to-end demo
+scripts/demo_risk_explainer.py 130 lines 3-case integration demo
+scripts/test_gemini_connection.py 50 lines Diagnostic
+tests/test_citation_parser.py 90 lines   7 sanity cases for the citation parser
+requirements.txt             +1 line     google-genai==2.6.0
+```
+
+---
+
+## Citation policy
+
+Footnote format. Mandatory Sources section. Provenance tags (`[Inferred]`, `[Not in chunks]`) for content beyond the chunks. Numbering bugs are caught by `_parse_citations()` and reported as warnings in the result dict — they never crash the pipeline.
+
+The prompt explicitly instructs Gemini that answers without Sources sections will "fail downstream validation." Block 4's second run confirmed this language is effective — Demo 3 had omitted Sources in the first run and produced a proper section after the prompt strengthening.
+
+---
+
+## What Day 8 will measure
+
+- Retrieval quality (recall@5 against hand-labeled gold chunks)
+- Generation quality (LLM-as-judge faithfulness using a separate model)
+- Citation health rate across the eval set
+- Abstention rate (focused vs elsewhere) — is the threshold right for both, or should they differ?
+- Threshold tuning (`SIMILARITY_THRESHOLD` and `FAITHFULNESS_THRESHOLD`)
+- Whether zero-shot prompting is sufficient or few-shot examples are warranted
+
+---
+
+**Headline takeaway**
+
+Day 7 closed the loop between Day 5's statistical risk scores and the original transcripts they were trained on. The Earnings Call Risk Radar can now predict that a call sounds risky AND explain why — with direct quotes from the call, footnote citations, faithfulness verification, graceful handling of edge cases (off-topic queries, interview formats, NaN features, transient API errors), and documented known limitations.

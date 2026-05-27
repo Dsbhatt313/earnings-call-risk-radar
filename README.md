@@ -222,20 +222,20 @@ from pathlib import Path
 REPO_ROOT = Path.cwd()
 dataset = pd.read_csv(REPO_ROOT / "data" / "processed" / "dataset_v2.csv", parse_dates=["date_parsed"])
 
-# Same time-based split as Day 3
+## Same time-based split as Day 3
 TRAIN_END = pd.Timestamp("2022-08-01")
 VAL_END = pd.Timestamp("2022-10-01")
 test_df = dataset[dataset["date_parsed"] >= VAL_END].copy()
 
-# Load shipping models
+## Load shipping models
 features = joblib.load(REPO_ROOT / "models" / "feature_cols_day5.joblib")
 model_y3d = joblib.load(REPO_ROOT / "models" / "model_y3d_xgb_day5.joblib")
 model_y5d = joblib.load(REPO_ROOT / "models" / "model_y5d_lr_day5.joblib")
 
-# Predict
+## Predict
 X_test = test_df[features]
 pred_y3d = model_y3d.predict_proba(X_test)[:, 1]   # XGBoost, handles any NaN natively
-# For LR (y_5d), drop rows with NaN in FinBERT features
+## For LR (y_5d), drop rows with NaN in FinBERT features
 clean_mask = X_test.isna().any(axis=1) == False
 pred_y5d = model_y5d.predict_proba(X_test[clean_mask])[:, 1]
 What Day 5 did NOT do (scope honesty)

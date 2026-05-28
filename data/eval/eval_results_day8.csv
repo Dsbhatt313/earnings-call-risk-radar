@@ -1,0 +1,21 @@
+query_id,stratum,is_answerable,is_sanity_check,abstained,api_failed,passed,recall_at_5,recall_at_10,precision_at_5,mean_gold_sim,top_sim,theme_coverage,faithfulness_mean,faith_unsupported,citation_valid,n_citations,n_gold,n_retrieved,latency_s,tokens_total,y_3d,y_5d,question_basis,focused_abstained,focused_theme_cov,elsewhere_abstained,elsewhere_theme_cov,notes
+1,standard,True,True,False,False,True,0.5,1.0,1.0,0.529,0.562,0.4,0.587,1,True,5,10,10,26.0,2631,,,,,,,,Day 7 Demo 1 carry-over for cross-day stability check
+2,standard,True,False,False,False,True,0.556,1.0,1.0,0.546,0.578,0.4,0.81,0,True,4,9,10,4.4,2500,,,,,,,,2021-2022 macro theme; breadth test
+3,standard,True,False,False,False,True,0.625,1.0,1.0,0.484,0.55,0.4,0.699,0,True,5,8,10,5.04,2780,,,,,,,,2022-2023 tech-sector theme; tone-distinction test
+4,standard,True,False,True,False,False,,,0.0,,0.445,,,,True,0,0,10,0.18,,,,,,,,,Boilerplate-trap test (Day 6 known limit): legal disclaimers contain these words
+5,standard,True,False,False,False,True,0.375,1.0,0.6,0.464,0.505,0.2,0.613,0,True,5,8,10,3.91,2537,,,,,,,,Negative business-framing retrieval test
+6,standard,True,False,False,False,True,0.625,1.0,1.0,0.536,0.567,0.0,0.686,1,True,5,8,10,14.67,2553,,,,,,,,Forward guidance; near-universal topic
+7,ticker,True,False,False,False,True,0.625,1.0,1.0,0.636,0.658,0.667,0.708,0,True,5,8,10,4.67,2713,,,,,,,,AAPL strong-theme ticker-filter recall test
+8,ticker,True,False,False,False,True,0.5,1.0,0.4,0.581,0.609,0.0,0.852,0,False,3,4,10,3.43,2491,,,,,,,,BYND demand softness; clear substantive content
+9,ticker,True,False,False,False,True,0.444,1.0,0.8,0.613,0.63,0.833,0.583,0,True,5,9,10,3.46,2472,,,,,,,,"Interview-format ticker test (Day 5 finding #6, Day 7 Block 6 NFLX abstention)"
+10,ticker,True,False,False,False,True,0.5,1.0,1.0,0.646,0.669,0.2,0.729,0,True,4,10,10,9.05,2482,,,,,,,,Standard heavyweight ticker; straightforward content
+11,ticker_quarter,True,True,False,False,True,1.0,1.0,1.0,0.588,0.676,0.6,0.84,0,True,3,5,10,4.14,2610,,,,,,,,Day 7 Demo 3 carry-over; known good output
+12,ticker_quarter,True,True,False,False,True,0.429,1.0,0.6,0.574,0.726,0.0,0.847,0,False,4,7,10,4.29,2591,,,,,,,,Day 7 Block 6 BYND breakthrough carry-over; stability check
+13,ticker_quarter,True,False,False,False,True,0.571,1.0,0.8,0.431,0.481,0.2,0.573,0,True,3,7,10,3.17,1769,,,,,,,,Fresh test-set query (post-2022-10-01); unseen by Day 5 models
+14,section,True,False,False,False,True,0.5,1.0,1.0,0.573,0.619,0.5,0.479,0,True,5,10,10,4.52,2597,,,,,,,,Q&A-section retrieval test (Day 5 finding #3: Q&A > prep for risk)
+15,section,True,False,False,False,True,0.444,1.0,0.8,0.454,0.507,0.8,0.792,0,True,4,9,10,4.38,1762,,,,,,,,Prep-section retrieval test; capital allocation is a prep-vs-Q&A divider
+16,off_topic,False,True,True,False,True,,,0.0,,0.189,,,,True,0,0,10,0.2,,,,,,,,,Day 7 Demo 5 carry-over; abstention anchor
+17,off_topic,False,False,True,False,True,,,0.0,,0.239,,,,True,0,0,10,0.2,,,,,,,,,Fresh off-topic; abstention generalization test
+18,off_topic,False,False,True,False,True,,,0.0,,0.27,,,,True,0,0,10,0.18,,,,,,,,,Fresh off-topic; far-domain test
+19,risk_integration,True,True,False,,True,,,,,,,0.744,0,True,5,,,19.32,5798,0.5733,0.4203,y_3d (XGBoost),False,0.75,False,0.0,Day 7 Block 6 BYND integration carry-over; pre-Day-5-test-cutoff
+20,risk_integration,True,False,True,,False,,,,,,,,,,,,,3.5,2331,0.5499,0.6918,y_5d (LR),True,,False,0.0,Fresh test-set integration (post-2022-10-01); unseen by Day 5 models

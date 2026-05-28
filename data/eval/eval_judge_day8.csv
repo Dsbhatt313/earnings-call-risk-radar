@@ -1,0 +1,16 @@
+query_id,stratum,judged,faithfulness,completeness,relevance,rationale,note
+1,standard,False,,,,,gen api_failed
+2,standard,False,,,,,gen api_failed
+3,standard,False,,,,,gen api_failed
+4,standard,False,,,,,abstained
+5,standard,False,,,,,gen api_failed
+6,standard,False,,,,,gen api_failed
+7,ticker,False,,,,,gen api_failed
+8,ticker,False,,,,,gen api_failed
+9,ticker,False,,,,,gen api_failed
+10,ticker,False,,,,,gen api_failed
+11,ticker_quarter,False,,,,,gen api_failed
+12,ticker_quarter,False,,,,,gen api_failed
+13,ticker_quarter,False,,,,,gen api_failed
+14,section,False,,,,,gen api_failed
+15,section,False,,,,,gen api_failed

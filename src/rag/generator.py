@@ -186,19 +186,33 @@ def _call_gemini(prompt: str, thinking: bool) -> tuple[str, dict]:
                 break
 
         except ClientError as e:
-            # 4xx errors: usually our fault (bad key, bad request) — don't retry
+            # 429 RESOURCE_EXHAUSTED can be a transient per-minute rate limit,
+            # so retry it like a server error. Other 4xx are our fault — don't retry.
+            if e.code == 429:
+                last_error = e
+                if attempt < MAX_GEMINI_ATTEMPTS:
+                    wait = GEMINI_BACKOFF_SECONDS[attempt - 1]
+                    print(
+                        f"  [Gemini 429 RESOURCE_EXHAUSTED on attempt "
+                        f"{attempt}/{MAX_GEMINI_ATTEMPTS}] retrying in {wait}s "
+                        f"(may be per-minute limit)..."
+                    )
+                    time.sleep(wait)
+                    continue
+                else:
+                    break
             return (
                 f"[Gemini call failed with client error {e.code}: {e}. "
                 f"This is likely a bug in our request, not a transient issue.]",
-                {},
+                {"api_failed": True},
             )
 
     # All retries exhausted
     return (
         f"[Gemini call failed after {MAX_GEMINI_ATTEMPTS} attempts. "
-        f"Last error: {last_error}. The service is likely overloaded; "
-        f"try again in a few minutes.]",
-        {},
+        f"Last error: {last_error}. The service is likely overloaded or the "
+        f"daily quota is exhausted; try again later.]",
+        {"api_failed": True},
     )
 
 
@@ -480,6 +494,7 @@ def generate_answer(
             "chunks_used": [],
             "chunks_retrieved": retrieved,
             "abstained": True,
+            "api_failed": False,
             "usage": {},
             "thinking": thinking,
         }
@@ -498,15 +513,18 @@ def generate_answer(
     # Step 7: faithfulness check (lexical overlap tripwire)
     faithfulness = check_faithfulness(answer_text, citations, qualifying)
 
+    api_failed = bool(usage.get("api_failed", False))
+
     return {
         "query": query,
         "answer": answer_text,
         "citations": citations,
         "citation_health": citation_health,
-        "faithfulness": faithfulness,
+        "faithfulness": None if api_failed else faithfulness,
         "chunks_used": qualifying,
         "chunks_retrieved": retrieved,
         "abstained": False,
+        "api_failed": api_failed,
         "usage": usage,
         "thinking": thinking,
     }

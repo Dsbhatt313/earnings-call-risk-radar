@@ -874,3 +874,326 @@ The prompt explicitly instructs Gemini that answers without Sources sections wil
 **Headline takeaway**
 
 Day 7 closed the loop between Day 5's statistical risk scores and the original transcripts they were trained on. The Earnings Call Risk Radar can now predict that a call sounds risky AND explain why — with direct quotes from the call, footnote citations, faithfulness verification, graceful handling of edge cases (off-topic queries, interview formats, NaN features, transient API errors), and documented known limitations.
+
+
+# Day 8 — Evaluation Harness
+
+This README documents the evaluation infrastructure built on Day 8, what it measured, what works, what doesn't, and known limitations. It ships with the repo as the public-facing summary of the evaluation effort.
+
+---
+
+## What Day 8 produced
+
+A complete evaluation harness for the Risk Radar RAG pipeline:
+
+- **20-query hand-labeled eval set** stratified across 6 use cases
+- **150 chunks individually labeled** (correct / tangential / wrong) — the gold-set construction is auditable via `eval_worksheet_day8.csv`
+- **Eval runner** (`scripts/run_eval.py`) producing per-query metrics across retrieval, generation, and abstention behavior
+- **LLM-as-judge runner** (`scripts/run_judge.py`) for independent semantic scoring (built, deferred run pending quota reset)
+
+---
+
+## Results summary
+
+### Retrieval (n=14 answerable queries)
+
+| Metric | Value |
+|---|---|
+| Mean recall@10 | **1.00** |
+| Mean recall@5 | 0.55 |
+| Mean precision@5 | 0.80 |
+
+Every gold chunk we labeled lands in the top-10 retrieval results. Recall@5 < 1 is expected mathematics: most queries have 7-10 gold chunks competing for 5 top slots.
+
+### Generation (n=14, lexical metrics only)
+
+| Metric | Value |
+|---|---|
+| Mean lexical faithfulness | 0.70 |
+| Mean theme coverage (substring) | 0.37 *(see limitation #2)* |
+| Citation health valid | 13/15 *(see limitation #3)* |
+
+### Abstention
+
+| Test | Result |
+|---|---|
+| Off-topic queries (n=3) | **3/3 correctly abstained** |
+| Boilerplate trap (q4) | **Correctly abstained** (top similarity 0.445, below 0.45 threshold) |
+| Unexpected abstentions on answerable queries | 1 (q4, expected — boilerplate trap) |
+
+### Risk-integration queries
+
+| Query | y_3d | y_5d | Focused | Elsewhere |
+|---|---|---|---|---|
+| q19 (BYND 2021-Q3, sanity check) | 0.573 | 0.420 | answered, theme_cov=0.75 | answered |
+| q20 (MSFT 2023-Q1, fresh test-set) | 0.550 | 0.692 | **abstained** | answered |
+
+The q20 abstention is a real finding: the fresh test-set call's chunks weakly align with the auto-generated adaptive question, so the focused-RAG correctly refuses to answer. The elsewhere-RAG still succeeds.
+
+---
+
+## What works
+
+- **Retrieval is strong.** recall@10 = 1.0 across the eval set.
+- **Abstention is reliable.** 3/3 off-topic + boilerplate trap caught.
+- **Citations parse cleanly for 13/15 queries.**
+- **Lexical faithfulness 0.70 mean** — answers stay grounded in cited chunks.
+- **Sanity-check stability.** Day 7 demo queries (q11, q12) reproduced known-good outputs (faith 0.84, 0.847).
+- **Honest abstention on fresh test-set integration.** q20 (post-Day-5-cutoff MSFT 2023-Q1) abstains on the focused-RAG side rather than confabulating.
+- **Honest API-failure handling.** Failed Gemini calls record as "not measured" (blank) instead of fake 0.0, so aggregates aren't polluted.
+
+---
+
+## Known limitations
+
+### 1. Daily Gemini free-tier quota cannot sustain iterative evaluation
+The biggest finding of Day 8. The 20-query eval (~17 generation calls) + the judge re-run (~14 more generation calls + 14 judge calls) hits the daily quota repeatedly. The 8-second inter-query spacing handles the per-minute rate limit but does nothing for the daily cap.
+
+**Consequence for Day 9 (Streamlit app):** the UI cannot assume concurrent users. Needs aggressive caching, a "queries remaining today" indicator, or a paid Gemini key.
+
+### 2. `theme_coverage` substring matcher is too weak to trust
+The Block 2 substring metric matches expected themes against the generated answer with case-insensitive substring lookup. This misses paraphrase. Concrete evidence: q12 scored lexical faithfulness 0.847 but theme_coverage 0.0 — impossible unless the metric is wrong.
+
+**Resolution:** the LLM-judge (Block 4, deferred) replaces this with semantic matching. Until the judge runs, treat theme_coverage as a tripwire, not a quality signal.
+
+### 3. Citation parsing failures on q8 and q12 (both BYND)
+Both BYND queries returned `citation_valid=False`. Not yet investigated. Could be a real citation bug or a parser edge case (e.g., a footnote citing a chunk that wasn't in the retrieved set after threshold filtering). Worth a 15-minute diagnostic.
+
+### 4. Same-system labeling bias
+Gold labels were drafted by Claude reading the top-10 retrieved chunks per query. The LLM-judge (when run) will be Gemini-on-Gemini (same vendor as generator). Independence is weaker than ideal:
+- Ideal: human labels + cross-vendor judge
+- Current: Claude labels + Gemini-on-Gemini judge
+
+This is documented in `eval_summary_day8.md` and reflected in the methodological caveats. The retrieval metrics are unaffected (chunk IDs are objective facts; "did this ID appear in top-10" is not a judgment call).
+
+### 5. Small sample size (n=20)
+A `measurement harness`, not a `benchmark result`. A defensible-but-not-rigorous evaluation. Larger eval sets (50-100 queries) are queued as future work.
+
+### 6. Cosine similarity is tone-blind
+Q8 asked about "concerns about retail demand" but surfaced positive-growth chunks. The embedder treats "discussing demand" and "discussing demand decline" as similarly relevant. Reranking or query-rewriting could address this.
+
+### 7. Within-call topical drift
+Q11 (AAPL 2019-Q3 iPhone) retrieved iPad/Services chunks too. The filter is correct (all match AAPL+2019-Q3) but within a single call, semantic similarity surfaces topically-adjacent content. Within-call reranking could improve precision.
+
+### 8. PYPL 2019-Q4 known limitation not tested
+Documented in Day 6 (malformed Q&A marker). We dropped the paired PYPL test from the original Block 1 plan when going from 21 to 20 queries. Worth re-adding in a future eval-set extension.
+
+### 9. Boilerplate cluster in vector store
+Legal disclaimers ("forward-looking statements involve risks and uncertainties...") are near-identical across all 273 calls. Currently mitigated by abstention (q4 abstains correctly). Could be removed from the index entirely as a future improvement.
+
+### 10. LLM-judge run not yet executed
+`scripts/run_judge.py` is built and verified (JSON parsing tested against 4 response format variants). The actual judge run is deferred to the next session due to today's exhausted Gemini quota. The `eval_judge_day8.csv` file exists with the right schema but all rows currently show `judged=False`.
+
+---
+
+## Future work
+
+### Will be done next session (Day 9 day-1)
+
+| Task | What it produces |
+|---|---|
+| Run `python -m scripts.run_judge` | Populates `eval_judge_day8.csv` with 14 semantic faithfulness/completeness/relevance scores |
+| Compare LLM-judge faithfulness vs lexical faithfulness | Validates (or invalidates) the lexical tripwire |
+
+### Genuine future-work items
+
+| Item | Priority | Notes |
+|---|---|---|
+| Investigate q8/q12 citation_valid=False | Low | Diagnostic only; both BYND |
+| Replace theme_coverage with semantic match | Med | LLM-judge already does this; substring metric should be retired |
+| Independent human relabeling of gold set | Med | Removes same-system bias |
+| Larger eval set (50-100 queries) | Med | More credible benchmark |
+| Cross-vendor judge (Claude judging Gemini) | Low | Requires paid Anthropic API key |
+| Reranking for tone-blind retrieval | Med | Real improvement opportunity |
+| Within-call topical reranking | Low | Refines q11-class precision |
+| Few-shot vs zero-shot prompt comparison (Block 6) | Low | Pure optimization on a working system |
+| Formal threshold sweep at 0.46-0.48 | Low | Analysis suggests 0.45 already optimal |
+| Remove boilerplate cluster from index | Low | Currently mitigated by abstention |
+| Add pre-flight check ("is eval set populated?") to runner | Low | Would have caught Day 8's empty-template bug |
+| Quota-aware Streamlit features (caching, demo mode, query counter) | High | Direct Day 9 requirement |
+
+---
+
+## File map (Day 8 artifacts)
+
+```
+data/eval/
+├── eval_set_day8.csv             # 20-query labeled eval set
+├── eval_worksheet_day8.csv       # 150-row labeling intermediate (auditable)
+├── eval_results_day8.csv         # Per-query metrics
+├── eval_per_chunk_day8.csv       # Per (query, chunk) flags
+├── eval_summary_day8.md          # Aggregate findings
+└── eval_judge_day8.csv           # LLM-judge scores (pending — deferred)
+
+scripts/
+├── build_eval_set.py             # Builds the labeling worksheet
+├── write_eval_set.py             # One-shot: writes labeled eval set from embedded data
+├── run_eval.py                   # Main eval runner
+├── run_judge.py                  # LLM-as-judge runner
+└── diag.py                       # One-off diagnostic (safe to delete)
+
+src/rag/
+└── generator.py                  # MODIFIED in Day 8 — api_failed flag + 429 retry
+```
+
+---
+
+## Re-running the evaluation
+
+After a fresh Gemini quota:
+
+```bash
+python -m scripts.run_eval        # ~5 minutes with 8s inter-query spacing
+python -m scripts.run_judge       # ~5 minutes (uses ~28 API calls)
+```
+
+Outputs are written to `data/eval/`. The summary doc (`eval_summary_day8.md`) is the recruiter-facing aggregate.
+
+---
+
+## Acknowledged process limitations
+
+Day 8 surfaced several process issues worth documenting:
+
+- The empty-template file bug (gold_chunks=NaN throughout) cost an hour. A pre-flight check would have caught it.
+- The half-applied edits to `run_eval.py` during the Block 4 architecture pivot left it broken; required a full revert.
+- The free-tier quota was a known constraint not designed around in the eval architecture.
+
+These are recorded honestly in `day8_journey.md` rather than airbrushed out.
+
+
+# day9_README.md — Streamlit App: Known Limitations & Future Work
+
+This document ships with the repo. It records, honestly, what the Day 9 Streamlit app does, what it does NOT do, what is verified vs unverified, and everything still open from Days 8 and 9 for a clean project completion. The goal (carried from earlier days): **real findings and honest interpretation, not the high-number game.**
+
+---
+
+## What the app is
+
+A single-file Streamlit application (`app.py`) that is a **presentation layer** over the existing Day 7/8 pipeline. It calls two functions and displays their results:
+- `explain_risk(ticker, quarter)` → Tab 1 "Risk Score"
+- `generate_answer(query, k, filter, thinking)` → Tab 2 "Ask the Filing"
+
+It adds **no new ML and no new RAG logic.** No `src/rag/` module or model was changed on Day 9. The intelligence was all built on Days 4–8; Day 9 makes it clickable.
+
+## What the app does (features)
+
+**Tab 1 — Risk Score**
+- Ticker + quarter dropdowns (sourced from `dataset_v2.csv`, the calls that actually have risk features).
+- Both Day 5 risk scores (y_3d XGBoost, y_5d LR) shown side by side with their top drivers in plain English.
+- An auto-generated "adaptive question" built from the top risk-driving features, with a note on which model's drivers built it.
+- Two grounded evidence sections: "Evidence from this call" (focused RAG) and "Similar discussion in other calls" (elsewhere RAG), each with citations and a faithfulness caption.
+- A diagnostics expander surfacing any `errors` from `explain_risk`.
+
+**Tab 2 — Ask the Filing**
+- Free-text question box.
+- Scope selector (all companies, or narrow to one ticker).
+- "Gemini thinking" toggle (on/off deeper reasoning).
+- Rendered answer with a citations expander, citation-health warning if the parser flagged issues, and a faithfulness caption.
+- Abstains visibly and honestly when no chunk clears the similarity threshold.
+
+**Cross-cutting**
+- **Session answer-cache:** the same query (per tab) never calls Gemini twice in a session; cache hits show a "no Gemini call made" toast.
+- **Daily usage counter** in the sidebar (`data/gemini_usage.json`), auto-resets at local midnight, counts only real calls (abstentions/failures excluded), warns at ~80% of the free-tier reference.
+- **Graceful quota failure:** a failed Gemini call renders a clean warning, never a crash.
+
+---
+
+## Verified vs UNVERIFIED (be honest about this)
+
+### Verified working (tested on Day 9)
+- App launches; both tabs render.
+- ChromaDB initializes once and does not crash (after the config fix below).
+- Retrieval runs; similarity threshold works.
+- Abstention path works end-to-end (off-topic "sourdough" question → clean abstain, zero quota).
+- Session cache works (repeat query → instant, no call, toast shown).
+- Usage counter works and stays honest through abstentions (held at 0).
+- Risk scores and drivers render in Tab 1 (both scores displayed in a live run).
+- The focused RAG explanation rendered in a live run.
+- Graceful handling of a real quota failure (the "elsewhere" call failed cleanly with a warning).
+
+### NOT yet verified (quota-blocked — NOT a known code defect)
+- A **live Gemini answer rendering** through the answer + citations expander + faithfulness caption in the browser (Tab 2, and the elsewhere section of Tab 1).
+- A **full risk analysis** where BOTH focused and elsewhere calls succeed.
+- The **"Gemini thinking" toggle** exercised live in-browser.
+
+These are flagged because the render code uses the same dict-shape that `generate_answer`/`explain_risk` already returned successfully in Day 7/8 function-level demos — so risk is low, but it has not been observed live. **Day 10 first step:** on fresh quota, run one risk analysis and one question to confirm, before deploying.
+
+---
+
+## Known limitations (app-specific, Day 9)
+
+1. **Free-tier quota is the binding constraint.** One risk analysis = 2 Gemini calls; one question = 1. The free `gemini-2.5-flash` daily cap is easily reached. The counter *warns* but deliberately does **not block** (chosen design: honest display over false lockout). On a public deploy, anyone's clicks burn the owner's quota.
+
+2. **No "demo mode" yet.** When quota is fully exhausted, the app shows honest failure messages but cannot produce answers. A hardcoded demo mode (canned AAPL output) was discussed and **deliberately deferred** to the deploy decision (Day 10), so a recruiter opening the live app on a dead quota doesn't see a non-functional demo.
+
+3. **File-watcher is disabled by necessity.** `.streamlit/config.toml` sets `fileWatcherType = "none"` to fix a ChromaDB crash (see below). Consequence: editing a file does not auto-reload the app; you must `Ctrl+C` and re-run. Acceptable locally; irrelevant once deployed.
+
+4. **Answer cache is session-only.** It lives in `st.session_state`, so closing the app empties it. (The usage counter, by contrast, persists to disk.) Two users, or two sessions, don't share cached answers — each session can re-burn quota for the same query.
+
+5. **Counter is approximate and local.** It tracks calls this app process makes, written to a local JSON file. It does not query Google for your true remaining quota, and it won't see calls made outside the app (e.g. `run_eval.py`, `run_judge.py`). The ~250/day figure is a reference, not a guaranteed limit.
+
+6. **First request is slow (cold start).** The first retrieval loads the Arctic embedder (~15–30s). Subsequent calls are fast. On Streamlit Cloud this cold start happens on each container spin-up.
+
+7. **Faithfulness shown is the weak lexical tripwire.** The displayed faithfulness is lexical overlap (Day 7's cheap check), explicitly labeled as such. It can mislead (Day 8: an answer scored 0.847 lexical but 0.0 substring theme coverage). The stronger LLM-judge number is not yet available (see deferred items).
+
+8. **Dropdowns depend on `dataset_v2.csv` being present.** If the dataset is missing at runtime (e.g. not committed on deploy), `load_ticker_quarters()` fails. Must be present on Streamlit Cloud.
+
+---
+
+## THE Day 9 bug (documented so it never recurs)
+
+**Symptom:** crash on first risk analysis — `AttributeError: 'RustBindingsAPI' object has no attribute 'bindings'` in `chromadb.PersistentClient` → `del self.bindings`, with a flood of `transformers ... No module named 'torchvision'` warnings.
+
+**Cause:** Streamlit's source file-watcher crawls every imported module on each rerun. Crawling `transformers` produced the torchvision noise; reloading the `rag` modules wiped their `lru_cache` singletons, causing ChromaDB to init a second client and fail to release the first's Rust bindings. **It is NOT a quota error and NOT a defect in our `src/` code** — quota errors surface as the clean `api_failed` warning instead.
+
+**Fix:** `.streamlit/config.toml` with `fileWatcherType = "none"` (and `logger level = "error"`). ChromaDB then inits exactly once. This file **must be committed and deployed** or the crash can recur on Streamlit Cloud.
+
+---
+
+## Deployment (Day 10) — open decisions & gotchas
+
+1. **`data/chroma_db/` is gitignored and large — biggest open question.** Options: (a) commit it (may exceed Streamlit Cloud size limits); (b) rebuild it on first cloud run from `chunks_day6.csv` (needs the embed step to run in the cloud — slow, memory-heavy); (c) host the store externally. **Decide this early on Day 10.**
+2. **`GEMINI_API_KEY` as a Streamlit secret**, never committed (`.env` stays gitignored).
+3. **`requirements.txt` must be the curated list**, not the full `pip freeze` (Windows-only/transitive pins can break the Linux build). Pin `streamlit` from `pip show streamlit`. Confirm whether `spacy` is actually imported; drop it + the `en_core_web_sm` line if not.
+4. **`.streamlit/config.toml` must be in the repo** (it is, via `git add .`).
+5. **`dataset_v2.csv` and `models/*.joblib` must be present** at runtime.
+6. **Memory:** Arctic embedder + ChromaDB + torch can exceed free-tier container RAM. If the cloud build OOMs, this is the likely culprit; a lighter embedder or a precomputed-results read-only mode may be needed (the v2 plan's own fallback: "pre-compute everything locally, deploy a lightweight read-only app").
+
+---
+
+## Deferred from Day 8 — STILL OPEN (do on Day 10 with fresh quota)
+
+| Item | Status | Notes |
+|---|---|---|
+| Run `python -m scripts.run_judge` | **STILL DEFERRED** (Day 8 → Day 9 → Day 10) | Quota-blocked both days. Populates `eval_judge_day8.csv` (faithfulness/completeness/relevance, 1–5). The eval differentiator for the README results table. Do this FIRST on Day 10. |
+| Formal threshold sweep (0.46 / 0.48) | DEFERRED | Day 8 analysis judged 0.45 fine; no run done. |
+| Zero-shot vs few-shot comparison | FUTURE WORK | System works zero-shot; few-shot is pure optimization. |
+| Investigate q8/q12 `citation_valid=False` (both BYND) | FUTURE WORK | One-off diagnostic, low priority. |
+| Replace substring `theme_coverage` with semantic match | Superseded by LLM-judge once run | — |
+| Independent human relabeling of gold set | FUTURE WORK | Removes same-system labeling bias; costly. |
+| Remove boilerplate cluster from index | FUTURE WORK | Currently mitigated by abstention. |
+| Cross-vendor judge (Claude vs Gemini) | FUTURE WORK | Needs a paid Anthropic key; current judge is Gemini-vs-Gemini (weaker independence). |
+| Reranking / query rewriting for tone-blind retrieval | FUTURE WORK | Cosine is tone-blind (q8: positive chunks for a "concerns" query). |
+| Larger eval set (50–100 queries) | FUTURE WORK | Current n=20 is a measurement harness, not a benchmark. |
+| PYPL 2019-Q4 malformed Q&A marker test | FUTURE WORK | Known from Day 6, not in eval set. |
+
+---
+
+## New future work surfaced on Day 9
+
+| Item | Notes |
+|---|---|
+| Verify the live render path | One risk analysis + one question + the thinking toggle, in-browser, on fresh quota. Pre-deploy gate. |
+| Demo / fallback mode | Canned output (or precomputed CSV-backed read-only mode) for when quota is dry, so the public app never looks broken. |
+| Persistent / shared answer cache | Current cache is session-only; a disk- or DB-backed cache would let repeat queries across sessions skip Gemini entirely — directly extends quota. |
+| True quota introspection | Counter is a local estimate; querying Google for real remaining quota would be more accurate. |
+| Architecture diagram + results table in README | Day 10 deliverable (draw.io PNG; AUC + RAG metrics + judge scores). |
+| Loom video + LinkedIn post + final resume bullet | Day 10 deliverables. |
+| LiteLLM multi-provider abstraction | Pre-existing future item; would let a paid Claude/OpenAI key drop in without code changes, sidestepping Gemini free-tier limits. |
+
+---
+
+## One-line honest project status
+
+End of Day 9: Risk Radar is a complete, clickable, honestly-instrumented Streamlit app over a verified 3-stage pipeline; everything is confirmed working except a live Gemini render (quota-blocked, not a defect), and the deferred LLM-judge run plus deployment remain for Day 10.

@@ -32,9 +32,23 @@ FEATURE_LABELS = {
 }
 
 # Free-tier reference point only — display, never a hard block.
-FREE_TIER_DAILY_REFERENCE = 250
+FREE_TIER_DAILY_REFERENCE = 20    # Free-tier daily cap on gemini-2.5-flash as of May 2026. Verified empirically on Day 10 after hitting 429s at request #21.
 
 st.set_page_config(page_title="Earnings Call Risk Radar", layout="wide")
+
+@st.cache_resource
+def _ensure_chroma_built():
+    """First-run-only: rebuild chroma_db from committed artifacts if missing.
+
+    Cached via @st.cache_resource so this runs at most once per Streamlit
+    session, never on widget reruns. Cloud cold start: ~2-3 min the first time,
+    instant thereafter. No-op on local runs where chroma_db already exists.
+    """
+    from scripts.build_chroma import build_if_missing
+    build_if_missing(verbose=True)
+    return True
+
+_ensure_chroma_built()
 
 # --------------------------------------------------------------------------
 # Quota counter (persisted to a small JSON file, reset daily)
@@ -133,16 +147,25 @@ def _render_explanation(label: str, exp) -> None:
             "or confident enough. This is intended behaviour, not a failure."
         )
         return
-    st.markdown(exp.get("answer", "_(no answer text)_"))
+
+    # Escape dollar signs so Streamlit's markdown renderer doesn't interpret
+    # paired "$...$" as LaTeX math (breaks any answer quoting dollar amounts,
+    # e.g. "$4 billion to $8 billion" — discovered Day 10 live verification).
+    answer = exp.get("answer", "_(no answer text)_")
+    answer = answer.replace("$", "\\$")
+    st.markdown(answer)
+
     citations = exp.get("citations") or {}
     if citations:
         with st.expander(f"Cited sources ({len(citations)})"):
             for marker, chunk_id in citations.items():
                 st.markdown(f"- `{marker}` → `{chunk_id}`")
+
     health = exp.get("citation_health") or {}
     if health.get("valid") is False:
         warns = health.get("warnings") or []
         st.caption("Citation check flagged: " + ("; ".join(warns) if warns else "see logs"))
+
     _render_faithfulness(exp)
 
 

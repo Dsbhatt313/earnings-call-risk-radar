@@ -8,9 +8,21 @@ generate_answer), then a SEPARATE judge model (gemini-2.0-flash) scores it
 
 Methodological note: judge and generator share a vendor (Google). Weaker
 independence than a cross-vendor judge, documented as a known limitation.
+After Day 10 free-tier shifts on gemini-2.0-flash, the judge was pinned to the
+same MODEL as the generator (gemini-2.5-flash). This further weakens independence
+but preserves the structured semantic scoring; a cross-vendor judge is the
+proper fix and is listed in "Future work."
 The judge is still a different model doing structured semantic scoring,
 catching paraphrase the lexical-overlap tripwire (Day 7) and substring
 theme_coverage (Block 2) miss.
+
+Day 10 free-tier reality check (May 2026):
+- gemini-2.0-flash free-tier daily quota dropped to 0 on this project, so the
+  original cross-model judge plan was not runnable.
+- gemini-2.5-flash free-tier daily quota is 20 requests per project per day —
+  insufficient for a full 14-query run (28 calls) in one calendar day.
+- This run completed n=1 (q1) as methodology demonstration. Full n=14 requires
+  a paid tier or a 2-day schedule. Documented in README "Limitations".
 
 Run from project root (after quota reset; ~14 gen + 14 judge calls):
     python -m scripts.run_judge
@@ -40,7 +52,7 @@ from scripts.run_eval import load_eval_set, STRATUM_OFF_TOPIC, STRATUM_RISK_INTE
 EVAL_DIR = PROJECT_ROOT / "data" / "eval"
 JUDGE_RESULTS_PATH = EVAL_DIR / "eval_judge_day8.csv"
 
-JUDGE_MODEL = "gemini-2.0-flash"   # separate from generator (gemini-2.5-flash)
+JUDGE_MODEL = "gemini-2.5-flash"   # SAME model as generator — fallback after gemini-2.0-flash free-tier daily quota dropped to 0 on Day 10 (Google shrinks older-model free tiers as newer ones launch). Weakens independence (same vendor AND same model), documented in README "Limitations". Judge still does structured semantic scoring the lexical tripwire (Day 7) and substring theme_coverage (Block 2) miss.
 RETRIEVAL_K = 10
 INTER_CALL_DELAY_SECONDS = 8       # respect per-minute rate limit
 

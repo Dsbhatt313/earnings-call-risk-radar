@@ -232,7 +232,7 @@ tab_risk, tab_ask = st.tabs(["Risk Score", "Ask the Filing"])
 with tab_risk:
     st.header("Risk Score")
     st.write(
-        "Pick a company and quarter. The app scores risk with both Day 5 models, "
+        "Pick a company and quarter. The app scores risk with both Day 3 and Day 5 models, "
         "explains what drove it, and pulls grounded evidence from the transcript."
     )
     tq = load_ticker_quarters()

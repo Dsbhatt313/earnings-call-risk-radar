@@ -4,8 +4,6 @@
 
 Predict stock risk from what executives *say* on earnings calls — and explain every prediction with grounded, cited evidence pulled straight from the transcript.
 
-![How Risk Radar works](docs/flow_diagram.png)
-
 ---
 
 ## The problem
@@ -123,8 +121,6 @@ The three stages form a **cascaded pipeline** — each stage's output feeds the 
 1. **Stage 1 sentiment** scores become **Stage 2 features.**
 2. **Stage 2 risk drivers** shape **Stage 3's** adaptive retrieval question.
 
-![Detailed architecture](docs/architecture.png)
-
 | Stage | Job | Key tech |
 |---|---|---|
 | 1 — Sentiment | Read tone per transcript section | FinBERT (`ProsusAI/finbert`), used frozen (transfer learning) |
@@ -132,6 +128,24 @@ The three stages form a **cascaded pipeline** — each stage's output feeds the 
 | 3 — RAG | Retrieve evidence, generate cited answers | Arctic-embed-l-v2.0 (1024-d) → ChromaDB (13,518 chunks, cosine) → Gemini 2.5 Flash |
 
 **Why these choices:** FinBERT over general-purpose sentiment because in finance "liability" is neutral, not negative — domain matters. Gradient-boosted trees and logistic regression over deep learning because tabular data under 10k rows favors them and they yield interpretable feature importance. RAG over fine-tuning because it's cheaper, updatable without retraining, and keeps every answer grounded in auditable source text.
+
+### The diagrams
+
+Two views of the same system. The first shows **what the components are and where each one runs**; the second shows **how data and a request move through it**.
+
+#### 1. Components and where each runs
+
+![Architecture overview](docs/architecture_overview.png)
+
+Each box is color-coded by its environment, per the legend: the **user's browser**, the **Streamlit Community Cloud** container that serves the app, the **external Gemini API**, **pretrained Hugging Face models**, and the **offline build pipeline** that runs once on the dev machine. Data stores (the trained models and the ChromaDB vector store) are drawn as cylinders.
+
+The important thing the diagram makes visible: the **heavy work is all in the offline pipeline** (the green container at the bottom) — FinBERT sentiment extraction, model training, and embedding the entire corpus. At serving time the app only loads the trained `joblib` models, reads the pre-built vector store, embeds the user's single query with the Arctic model, and calls Gemini. That separation is deliberate, and it's why the live app stays light.
+
+#### 2. Data and request flow
+
+![Data and request flow](docs/flow_diagram.png)
+
+Read left to right in three steps: **collect** the raw data, **process & index** it once offline (training the risk models on one track, building the vector store on the other), then **serve** every request live. The dashed regions mark the boundary between what happens once (the left two-thirds) and what happens on every visit (the right third). At serving time the app reads the two pre-built stores, talks to Gemini, and returns a result to the browser — which is why the whole thing fits comfortably in a free-tier cloud container.
 
 ---
 
@@ -150,8 +164,8 @@ risk-radar/
 │   └── config.toml              # Disables file-watcher (fixes a ChromaDB init crash)
 │
 ├── docs/
-│   ├── architecture_simple.png  # Plain-language "how it works" diagram
-│   └── architecture.png         # Detailed stage-by-stage diagram
+│   ├── architecture_overview.png  # Component diagram — what runs where
+│   └── flow_diagram.png           # Data & request flow — offline vs. serving
 │
 ├── data/
 │   ├── raw/                     # gitignored — source prices, transcripts, lexicons
@@ -189,8 +203,8 @@ risk-radar/
 
 #### `docs/`
 
-- **`architecture_simple.png`** — the plain-language, three-step diagram used at the top of this README and in the demo.
-- **`architecture.png`** — the detailed, stage-by-stage diagram with model names, metrics, and data flow.
+- **`architecture_overview.png`** — the component diagram: every runtime piece and data store, color-coded by where it runs, plus the offline build pipeline.
+- **`flow_diagram.png`** — the horizontal data-and-request flow, splitting the one-time offline build from live serving.
 
 #### `data/`
 

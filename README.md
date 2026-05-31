@@ -153,38 +153,116 @@ Read left to right in three steps: **collect** the raw data, **process & index**
 
 ```
 risk-radar/
-├── app.py                       # Streamlit app — both tabs, caching, usage counter
-├── requirements.txt             # Pinned runtime dependencies
+│
+├── app.py                            # Streamlit app — both tabs, caching, usage counter, cold-start rebuild hook
+├── requirements.txt                  # Curated, pinned runtime dependencies
 ├── README.md
-├── TODO_POST_DEPLOY.md          # Documented follow-ups (e.g. full LLM-judge run)
-├── .env.example                 # Template for GEMINI_API_KEY (real .env is gitignored)
+├── TODO_POST_DEPLOY.md               # Documented follow-ups (full LLM-judge run, etc.)
+├── .env                              # gitignored — holds GEMINI_API_KEY
+├── .env.example                      # template for the required secret
 ├── .gitignore
 │
 ├── .streamlit/
-│   └── config.toml              # Disables file-watcher (fixes a ChromaDB init crash)
+│   └── config.toml                   # fileWatcherType = "none" (fixes ChromaDB init crash)
 │
 ├── docs/
-│   ├── architecture_overview.png  # Component diagram — what runs where
-│   └── flow_diagram.png           # Data & request flow — offline vs. serving
+│   ├── architecture_overview.png     # component diagram — what runs where
+│   └── flow_diagram.png              # data & request flow — offline vs. serving
 │
 ├── data/
-│   ├── raw/                     # gitignored — source prices, transcripts, lexicons
-│   ├── processed/               # cleaned datasets + committed RAG artifacts
-│   └── eval/                    # evaluation set, results, and summaries
+│   │
+│   ├── raw/                          # gitignored — original source data
+│   │   ├── transcripts_raw.csv       #   Kaggle Motley Fool dump (470 rows)
+│   │   ├── prices/                   #   yfinance daily price pulls per ticker
+│   │   └── LoughranMcDonald_lexicon.csv
+│   │
+│   ├── processed/
+│   │   ├── transcripts.csv           # 274 deduplicated transcripts (first clean pass)
+│   │   ├── transcripts_v2.csv        # 273 — drops mislabeled WMT Investor Day; modeling input
+│   │   ├── features.csv              # 9 lexicon features + per-ticker z-scores
+│   │   ├── labels.csv                # excess-return labels (1/3/5-day windows)
+│   │   ├── dataset.csv               # features joined to labels (273 × 27)
+│   │   ├── finbert_scores.csv        # FinBERT sentiment intermediate (273 × 29)
+│   │   ├── dataset_v2.csv            # + FinBERT features (273 × 52) — final model input
+│   │   ├── day5_results_summary.csv  # test AUCs, CV scores, model choices
+│   │   ├── chunks_day6.csv           # committed — 13,518 chunks; rebuild source artifact
+│   │   └── embeddings_day6.npy       # committed — (13518, 1024) float32; rebuild source artifact
+│   │
+│   ├── eval/
+│   │   ├── eval_set_day8.csv         # 20-query hand-labeled eval set
+│   │   ├── eval_worksheet_day8.csv   # 150-row labeling intermediate (auditable)
+│   │   ├── eval_results_day8.csv     # per-query retrieval + generation metrics
+│   │   ├── eval_per_chunk_day8.csv   # per (query, chunk) correctness flags
+│   │   ├── eval_summary_day8.md      # recruiter-facing aggregate findings
+│   │   ├── eval_judge_day8.csv       # LLM-as-judge scores (q1 scored; rest deferred)
+│   │   └── eval_judge_day8_failed_run.csv  # evidence of the cross-model judge failure
+│   │
+│   └── gemini_usage.json             # gitignored — runtime daily-call counter
 │
-├── models/                      # trained, serialized classifiers (joblib)
+├── models/
+│   ├── model_y3d_xgb_day5.joblib     # SHIPPING — 3-day XGBoost classifier
+│   ├── model_y5d_lr_day5.joblib      # SHIPPING — 5-day Logistic Regression pipeline
+│   ├── feature_cols_day5.joblib      # SHIPPING — the 17 feature names both models expect
+│   ├── model_y1d_lr_v1.joblib        # earlier candidate (provenance)
+│   ├── model_y3d_lr_v2.joblib        # earlier candidate (provenance)
+│   ├── model_y5d_xgboost.joblib      # earlier candidate (provenance)
+│   └── feature_cols.joblib           # earlier feature schema (provenance)
 │
-├── notebooks/                   # exploratory analysis, one notebook per phase
+├── notebooks/
+│   ├── 01_data_collection.ipynb      # transcripts + prices: pull, dedup, clean
+│   ├── 02_features_labels.ipynb      # lexicon features + excess-return labels
+│   ├── 03_modeling.ipynb             # time-based split; LR vs XGBoost baseline
+│   ├── 04_finbert.ipynb              # FinBERT sentiment feature extraction
+│   └── 05_modeling_v2.ipynb          # combined lexicon + FinBERT models
 │
 ├── src/
 │   ├── __init__.py
-│   └── rag/                     # the retrieval-augmented-generation engine
+│   └── rag/
+│       ├── __init__.py
+│       ├── chunker.py                # sentence-aware chunking (spaCy + Arctic tokenizer)
+│       ├── embedder.py               # Arctic-embed-l-v2.0 → 1024-d L2-normalized vectors
+│       ├── vector_store.py           # ChromaDB loader + collection accessor
+│       ├── retriever.py              # query interface: cosine search + metadata filters
+│       ├── gemini_client.py          # cached singleton wrapper around the Gemini SDK
+│       ├── generator.py              # full RAG: retrieve → prompt → generate → verify
+│       └── risk_explainer.py         # Stage 2 ↔ Stage 3 integration (explain_risk)
 │
-├── scripts/                     # runnable pipeline steps, demos, and diagnostics
+├── scripts/
+│   ├── __init__.py
+│   ├── build_chroma.py               # rebuild vector store from committed CSV + NPY (cold start)
+│   ├── run_chunker.py                # transcripts → chunks_day6.csv
+│   ├── run_embedder.py               # chunks → embeddings_day6.npy
+│   ├── run_chroma_loader.py          # chunks + embeddings → chroma_db/
+│   ├── run_eval.py                   # retrieval + generation eval harness
+│   ├── run_judge.py                  # LLM-as-judge semantic scoring
+│   ├── build_eval_set.py             # builds the labeling worksheet
+│   ├── write_eval_set.py             # writes the labeled eval set from embedded data
+│   ├── demo_retrieval.py             # sample retrieval queries
+│   ├── demo_generation.py            # sample RAG answers
+│   ├── demo_risk_explainer.py        # sample risk explanations
+│   ├── test_gemini_connection.py     # Gemini connectivity diagnostic
+│   ├── sanity_check_embeddings.py    # within- vs between-similarity check
+│   ├── verify_edge_cases.py          # NFLX interview + PYPL spot-checks
+│   ├── diagnose_qa_marker.py         # diagnostic for the two Q&A-marker variants
+│   ├── diagnose_pypl_2019q4.py       # diagnostic for the malformed PYPL marker
+│   └── diag.py                       # one-off scratch diagnostic
 │
-├── tests/                       # sanity tests for the embedder, chunker, and parser
+├── tests/
+│   ├── __init__.py
+│   ├── test_arctic_embed.py          # embedding-model sanity checks
+│   ├── test_chunker_sample.py        # 6 chunker assertions on a sample
+│   └── test_citation_parser.py       # 7 citation-health parser cases
 │
-└── chroma_db/                   # gitignored — vector store, rebuilt on first run
+├── chroma_db/                        # gitignored — rebuilt on first run by build_chroma.py
+│   ├── chroma.sqlite3                #   collection metadata
+│   └── <collection-uuid>/            #   HNSW index segment
+│       ├── data_level0.bin           #     embedding vectors
+│       ├── header.bin
+│       ├── index_metadata.pickle
+│       ├── length.bin
+│       └── link_lists.bin            #     HNSW graph links
+│
+└── venv/                             # gitignored — local virtual environment
 ```
 
 ### Folder-by-folder

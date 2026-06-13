@@ -7,6 +7,13 @@ from datetime import date
 from src.rag.risk_explainer import explain_risk
 from src.rag.generator import generate_answer
 
+import os
+try:
+    if "GEMINI_API_KEY" in st.secrets:
+        os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"]
+except Exception:
+    pass
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATASET_PATH = PROJECT_ROOT / "data" / "processed" / "dataset_v2.csv"
 USAGE_PATH = PROJECT_ROOT / "data" / "gemini_usage.json"

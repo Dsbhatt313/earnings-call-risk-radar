@@ -1,0 +1,42 @@
+name: Keep Streamlit app awake
+
+# Streamlit Community Cloud puts apps to sleep after a period of inactivity.
+# This workflow opens the app in a headless browser on a schedule and clicks
+# the "wake up" button if the app has gone to sleep, so visitors always land
+# on a live app.
+
+on:
+  schedule:
+    # Every 4 hours (UTC). GitHub may delay scheduled runs under load, so we
+    # keep the interval well below Streamlit's inactivity threshold.
+    - cron: '0 */4 * * *'
+  workflow_dispatch: {} # allow manual "Run workflow" from the Actions tab
+
+# Prevent overlapping runs.
+concurrency:
+  group: keep-alive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      APP_URL: https://earningscallriskradar.streamlit.app/
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright (Chromium)
+        run: |
+          npm init -y
+          npm install playwright@latest
+          npx playwright install --with-deps chromium
+
+      - name: Wake / keep app alive
+        run: node .github/keep_alive.js
